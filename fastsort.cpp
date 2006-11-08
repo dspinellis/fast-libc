@@ -9,6 +9,8 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 
+#define min(a, b) ((a) < (b) ? (a) : (b))
+
 static void
 error(const char *s)
 {
@@ -19,13 +21,10 @@ error(const char *s)
 int
 compare(const struct iovec *a, const struct iovec *b)
 {
-	int r, l;
-
-	if (a->iov_len < b->iov_len)
-		l = a->iov_len;
-	else
-		l = b->iov_len;
-	r = memcmp(a->iov_base, b->iov_base, l - 1);
+	int r;
+	
+	r = memcmp(a->iov_base, b->iov_base,
+	    min(a->iov_len, b->iov_len) - 1);
 	if (r == 0)
 		return (a->iov_len - b->iov_len);
 	else
@@ -38,8 +37,10 @@ main(int argc, char *argv[])
 	struct stat sb;
 	char *p, *end, *linestart;
 	struct iovec *iov;
-	bool newline;
+	int iovmax;
 
+	if ((iovmax = (int)sysconf(_SC_IOV_MAX)) == -1)
+		error("sysconf");
 	if ((fd = open(argv[1], 0)) < 0)
 		error(argv[1]);
 	if (fstat(fd, &sb) < 0)
@@ -77,6 +78,15 @@ main(int argc, char *argv[])
 		iocnt++;
 	}
 	qsort(iov, iocnt, sizeof(*iov), compare);
-	writev(1, iov, iocnt);
+	/* Write result in iovmax chunks */
+	while (iocnt > 0) {
+		int count, n;
+
+		count = min(iovmax, iocnt);
+		if (writev(1, iov, count) == -1)
+			error("writev");
+		iov += count;
+		iocnt -= count;
+	}
 	return (0);
 }
