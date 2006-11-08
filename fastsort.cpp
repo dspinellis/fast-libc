@@ -42,7 +42,7 @@ struct compare : public binary_function <const struct iovec &, const struct iove
 int
 main(int argc, char *argv[])
 {
-	int fd, i, count, iocnt;
+	int fd, i, count, iocnt, ioalloc;
 	struct stat sb;
 	char *p, *end, *linestart;
 	int iovmax;
@@ -61,6 +61,9 @@ main(int argc, char *argv[])
 	/* Index the file's lines */
 	linestart = p;
 	end = p + sb.st_size;
+	iocnt = 0;
+	ioalloc = 1024;
+	iov.resize(ioalloc);
 	for (;;) {
 		p = (char *)memchr(linestart, '\n', end - linestart);
 		if (p == NULL) {
@@ -70,11 +73,16 @@ main(int argc, char *argv[])
 			} else
 				break;
 		}
-		v.iov_base = linestart;
-		v.iov_len = p - linestart + 1;
-		iov.push_back(v);
+		if (iocnt >= ioalloc) {
+			ioalloc *= 2;
+			iov.resize(ioalloc);
+		}
+		iov[iocnt].iov_base = linestart;
+		iov[iocnt].iov_len = p - linestart + 1;
 		linestart = p + 1;
+		iocnt++;
 	}
+	iov.resize(iocnt);
 	sort(iov.begin(), iov.end(), compare());
 	/* Write result in iovmax chunks */
 	for (iocnt = iov.size(), i = 0; iocnt > 0; iocnt -= count, i += count) {
