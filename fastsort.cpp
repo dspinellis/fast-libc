@@ -1,6 +1,7 @@
 #include <stdlib.h>
 #include <stdbool.h>
 #include <stdio.h>
+#include <string.h>
 #include <unistd.h>
 
 #include <sys/types.h>
@@ -13,6 +14,22 @@ error(const char *s)
 {
 	perror(s);
 	exit(1);
+}
+
+int
+compare(const struct iovec *a, const struct iovec *b)
+{
+	int r, l;
+
+	if (a->iov_len < b->iov_len)
+		l = a->iov_len;
+	else
+		l = b->iov_len;
+	r = memcmp(a->iov_base, b->iov_base, l - 1);
+	if (r == 0)
+		return (a->iov_len - b->iov_len);
+	else
+		return (r);
 }
 
 main(int argc, char *argv[])
@@ -34,28 +51,32 @@ main(int argc, char *argv[])
 	/* Index the file's lines */
 	iocnt = 0;
 	ioalloc = 1024;
-	iov = malloc(ioalloc * sizeof(struct iovec));
+	iov = malloc(ioalloc * sizeof(*iov));
 	if (iov == NULL)
 		error("malloc");
 	linestart = p;
 	end = p + sb.st_size;
-	for (; p < end; p++)
-		if (*p == '\n') {
-			iov[iocnt].iov_base = linestart;
-			iov[iocnt].iov_len = p - linestart + 1;
-			linestart = p + 1;
-			iocnt++;
-			if (iocnt > ioalloc) {
-				ioalloc *= 2;
-				iov = realloc(iov, ioalloc * sizeof(*iov));
-				if (iov == NULL)
-					error("realloc");
-			}
+	for (;;) {
+		p = memchr(linestart, '\n', end - linestart);
+		if (p == NULL) {
+			if (linestart != end) {
+				fprintf(stderr, "File does not end with a newline\n");
+				exit(1);
+			} else
+				break;
 		}
-	if (p[-1] != '\n') {
-		fprintf(stderr, "File does not end with a newline\n");
-		exit(1);
+		if (iocnt >= ioalloc) {
+			ioalloc *= 2;
+			iov = realloc(iov, ioalloc * sizeof(*iov));
+			if (iov == NULL)
+				error("realloc");
+		}
+		iov[iocnt].iov_base = linestart;
+		iov[iocnt].iov_len = p - linestart + 1;
+		linestart = p + 1;
+		iocnt++;
 	}
+	qsort(iov, iocnt, sizeof(*iov), compare);
 	writev(1, iov, iocnt);
 	return (0);
 }
