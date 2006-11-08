@@ -1,15 +1,22 @@
-#include <stdlib.h>
-#include <stdbool.h>
-#include <stdio.h>
-#include <string.h>
-#include <unistd.h>
+#include <vector>
+#include <algorithm>
+#include <functional>
 
+#include <string>
+#include <iostream>
+
+#include <cstdlib>
+#include <cstdio>
+#include <cstring>
+
+using namespace std;
+
+#include <fcntl.h>
+#include <unistd.h>
 #include <sys/types.h>
 #include <sys/uio.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
-
-#define min(a, b) ((a) < (b) ? (a) : (b))
 
 static void
 error(const char *s)
@@ -18,26 +25,28 @@ error(const char *s)
 	exit(1);
 }
 
-int
-compare(const struct iovec *a, const struct iovec *b)
-{
-	int r;
-	
-	r = memcmp(a->iov_base, b->iov_base,
-	    min(a->iov_len, b->iov_len) - 1);
-	if (r == 0)
-		return (a->iov_len - b->iov_len);
-	else
-		return (r);
-}
+	vector <struct iovec> iov;
 
+struct compare : public binary_function <const struct iovec &, const struct iovec &, bool> {
+	bool operator()(const struct iovec &a, const struct iovec &b) const {
+		int r;
+		
+		r = memcmp(a.iov_base, b.iov_base,
+		    min(a.iov_len, b.iov_len) - 1);
+		if (r == 0)
+			r = (a.iov_len - b.iov_len);
+		return (r < 0);
+	}
+};
+
+int
 main(int argc, char *argv[])
 {
-	int fd, i, iocnt, ioalloc;
+	int fd, i, count, iocnt;
 	struct stat sb;
 	char *p, *end, *linestart;
-	struct iovec *iov;
 	int iovmax;
+	struct iovec v;
 
 	if ((iovmax = (int)sysconf(_SC_IOV_MAX)) == -1)
 		error("sysconf");
@@ -47,18 +56,13 @@ main(int argc, char *argv[])
 		error("fstat");
 	if (sb.st_size == 0)
 		return (0);
-	if ((p = mmap(0, sb.st_size, PROT_READ, MAP_NOCORE, fd, 0)) == MAP_FAILED)
+	if ((p = (char *)mmap(0, sb.st_size, PROT_READ, MAP_NOCORE, fd, 0)) == MAP_FAILED)
 		error("mmap");
 	/* Index the file's lines */
-	iocnt = 0;
-	ioalloc = 1024;
-	iov = malloc(ioalloc * sizeof(*iov));
-	if (iov == NULL)
-		error("malloc");
 	linestart = p;
 	end = p + sb.st_size;
 	for (;;) {
-		p = memchr(linestart, '\n', end - linestart);
+		p = (char *)memchr(linestart, '\n', end - linestart);
 		if (p == NULL) {
 			if (linestart != end) {
 				fprintf(stderr, "File does not end with a newline\n");
@@ -66,26 +70,18 @@ main(int argc, char *argv[])
 			} else
 				break;
 		}
-		if (iocnt >= ioalloc) {
-			ioalloc *= 2;
-			iov = realloc(iov, ioalloc * sizeof(*iov));
-			if (iov == NULL)
-				error("realloc");
-		}
-		iov[iocnt].iov_base = linestart;
-		iov[iocnt].iov_len = p - linestart + 1;
+		v.iov_base = linestart;
+		v.iov_len = p - linestart + 1;
+		iov.push_back(v);
 		linestart = p + 1;
-		iocnt++;
 	}
-	qsort(iov, iocnt, sizeof(*iov), compare);
+	sort(iov.begin(), iov.end(), compare());
 	/* Write result in iovmax chunks */
-	while (iocnt > 0) {
-		int count, n;
+	for (iocnt = iov.size(), i = 0; iocnt > 0; iocnt -= count, i += count) {
 
 		count = min(iovmax, iocnt);
-		if (writev(1, iov, count) == -1)
+		if (writev(1, &iov[i], count) == -1)
 			error("writev");
-		iov += count;
 		iocnt -= count;
 	}
 	return (0);
