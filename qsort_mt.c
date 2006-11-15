@@ -544,16 +544,12 @@ done:
 	verify(pthread_mutex_unlock(&c->mtx_slot));
 	verify(pthread_mutex_unlock(&c->mtx_common));
 	/* Launch threads for the two halfs. */
+	lleft = NULL;
 	if (left.n > c->forkelem) {
 		left.common = c;
 		left.a = a;
-		left.sibling = NULL;
-		if (nchildren == 2)
-			left.sc = sc_signal;
-		else {
-			left.sc = sc_join;
-			left.joinid = id;
-		}
+		left.sc = sc_join;
+		left.joinid = id;
 		lleft = qsort_launch(&left);
 		if (lleft == NULL)
 			nchildren--;
@@ -561,24 +557,20 @@ done:
 	if (right.n > c->forkelem) {
 		right.common = c;
 		right.a = pn - right.n * es;
-		right.sc = sc_join;
-		right.joinid = id;
 		if (nchildren == 2)
-			right.sibling = lleft;
-		else
-			right.sibling = NULL;
-		lright = qsort_launch(&right);
-		if (lright == NULL) {
-			nchildren--;
-			/* Manually give sibling the go ahead. */
-			if (nchildren == 1) {
-				verify(pthread_mutex_lock(&lleft->mtx_ga));
-				lleft->ga = true;
-				verify(pthread_cond_signal(&lleft->cond_ga));
-				verify(pthread_mutex_unlock(&lleft->mtx_ga));
-			}
+			right.sc = sc_signal;
+		else {
+			right.sc = sc_join;
+			right.joinid = id;
 		}
+		lright = qsort_launch(&right);
+		if (lright == NULL)
+			nchildren--;
 	}
+	if (nchildren == 2)
+		lleft->sibling = lright;
+	else if (lleft)
+		lleft->sibling = NULL;
 	/* Detach if nobody will ask to join us. */
 	if (nchildren == 0)
 		pthread_detach(id);
