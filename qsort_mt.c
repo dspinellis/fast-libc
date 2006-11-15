@@ -194,6 +194,7 @@ struct common {
 	size_t es;		/* Element size. */
 	void *thunk;		/* Thunk for qsort_r */
 	cmp_t *cmp;		/* Comparison function */
+	int nthreads;		/* Number of working threads. */
 	int nslots;		/* Number of thread slots. */
 	int workingslots;	/* Number of threads doing sort work. */
 				/* Used for thread spawning. */
@@ -268,7 +269,8 @@ qsort_mt(void *a, size_t n, size_t es, cmp_t *cmp, int maxthreads, int forkelem)
 	c.es = es;
 	c.cmp = cmp;
 	c.forkelem = forkelem;
-	c.nslots = maxthreads;
+	c.nthreads = maxthreads;
+	c.nslots = maxthreads * 3;
 	c.workingslots = 0;
 	c.activeslots = 0;
 
@@ -336,7 +338,7 @@ qsort_launch(struct qsort *qs)
 #endif
 	for (;;) {
 		verify(pthread_mutex_lock(&qs->common->mtx_common));
-		if (qs->common->workingslots < qs->common->nslots) {
+		if (qs->common->workingslots < qs->common->nthreads) {
 			qs->common->workingslots++;
 			qs->common->activeslots++;
 			/* Find the empty slot */
