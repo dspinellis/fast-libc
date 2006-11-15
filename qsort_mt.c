@@ -329,63 +329,65 @@ qsort_launch(struct qsort *qs)
 	struct qsort *sqs;
 
 	DLOG("%10s n=%-10d Start at %p\n", "Launcher", qs->n, qs->a);
-#ifdef SORT_DEBUG
+#ifdef DEBUG_SORT
 	for (i = 0; i < qs->n; i++)
 		fprintf(stderr, "%d ", ((int*)qs->a)[i]);
 	putc('\n', stderr);
 #endif
-	verify(pthread_mutex_lock(&qs->common->mtx_common));
-	if (qs->common->workingslots < qs->common->nslots) {
-		qs->common->workingslots++;
-		qs->common->activeslots++;
-		/* Find the empty slot */
-		for (i = 0; i < qs->common->nslots; i++)
-			if (!qs->common->slots[i].used) {
-				sqs = &qs->common->slots[i];
-				sqs->a = qs->a;
-				sqs->n = qs->n;
-				sqs->sc = qs->sc;
-				sqs->sibling = qs->sibling;
-				sqs->joinid = qs->joinid;
-				sqs->used = true;
-				sqs->ga = false;
-				qs = sqs;
-				break;
-			}
-		assert(i != qs->common->nslots);
-		verify(pthread_mutex_unlock(&qs->common->mtx_common));
-		if (pthread_create(&qs->id, NULL, qsort_algo, qs) == 0) {
-			DLOG("%10x n=%-10d Started new thread: i=%d activeslots=%d\n",
-			    qs->id, qs->n, i, qs->common->activeslots);
-			return (qs);
-		} else if (errno == EAGAIN) {
-			/* Could sleep(2), but probably faster to qsort(3). */
-			verify(pthread_mutex_lock(&qs->common->mtx_common));
-			qs->common->workingslots--;
-			qs->common->activeslots--;
-			qs->used = false;
+	for (;;) {
+		verify(pthread_mutex_lock(&qs->common->mtx_common));
+		if (qs->common->workingslots < qs->common->nslots) {
+			qs->common->workingslots++;
+			qs->common->activeslots++;
+			/* Find the empty slot */
+			for (i = 0; i < qs->common->nslots; i++)
+				if (!qs->common->slots[i].used) {
+					sqs = &qs->common->slots[i];
+					sqs->a = qs->a;
+					sqs->n = qs->n;
+					sqs->sc = qs->sc;
+					sqs->sibling = qs->sibling;
+					sqs->joinid = qs->joinid;
+					sqs->used = true;
+					sqs->ga = false;
+					qs = sqs;
+					break;
+				}
+			assert(i != qs->common->nslots);
 			verify(pthread_mutex_unlock(&qs->common->mtx_common));
-			qsort(qs->a, qs->n, qs->common->es, qs->common->cmp);
-			/* XXX should include a syslog call here */
-			DLOG("EAGAIN on create_thread\n");
-			fprintf(stderr, "EAGAIN on create_thread\n");
-			return (NULL);
-		} else {
-			/* XXX Remove printf/perror from production release */
-			fprintf(stderr, "active=%d, working=%d\n",
-			    qs->common->workingslots,
-			    qs->common->activeslots);
-			perror("pthread_create");
-			assert(("pthread_create failed", false));
-		}
-	} else
-		verify(pthread_mutex_unlock(&qs->common->mtx_common));
-	/* Wait for a thread to finish. */
-	DLOG("%10s n=%-10d Wait for thread termination\n", "Launcher", qs->n);
-	verify(pthread_mutex_lock(&qs->common->mtx_slot));
-	verify(pthread_cond_wait(&qs->common->cond_slot,
-	    &qs->common->mtx_slot));
-	verify(pthread_mutex_unlock(&qs->common->mtx_slot));
+			if (pthread_create(&qs->id, NULL, qsort_algo, qs) == 0) {
+				DLOG("%10x n=%-10d Started new thread: i=%d activeslots=%d\n",
+				    qs->id, qs->n, i, qs->common->activeslots);
+				return (qs);
+			} else if (errno == EAGAIN) {
+				/* Could sleep(2), but probably faster to qsort(3). */
+				verify(pthread_mutex_lock(&qs->common->mtx_common));
+				qs->common->workingslots--;
+				qs->common->activeslots--;
+				qs->used = false;
+				verify(pthread_mutex_unlock(&qs->common->mtx_common));
+				qsort(qs->a, qs->n, qs->common->es, qs->common->cmp);
+				/* XXX should include a syslog call here */
+				DLOG("EAGAIN on create_thread\n");
+				fprintf(stderr, "EAGAIN on create_thread\n");
+				return (NULL);
+			} else {
+				/* XXX Remove printf/perror from production release */
+				fprintf(stderr, "active=%d, working=%d\n",
+				    qs->common->workingslots,
+				    qs->common->activeslots);
+				perror("pthread_create");
+				assert(("pthread_create failed", false));
+			}
+		} else
+			verify(pthread_mutex_unlock(&qs->common->mtx_common));
+		/* Wait for a thread to finish. */
+		DLOG("%10s n=%-10d Wait for thread termination\n", "Launcher", qs->n);
+		verify(pthread_mutex_lock(&qs->common->mtx_slot));
+		verify(pthread_cond_wait(&qs->common->cond_slot,
+		    &qs->common->mtx_slot));
+		verify(pthread_mutex_unlock(&qs->common->mtx_slot));
+	}
 }
 
 /* Thread-callable quicksort. */
@@ -438,7 +440,7 @@ qsort_algo(void *p)
 		break;
 	}
 	DLOG("%10x n=%-10d Got the go ahead\n", id, n);
-#ifdef SORT_DEBUG
+#ifdef DEBUG_SORT
 	int i;
 	for (i = 0; i < qs->n; i++)
 		fprintf(stderr, "%d ", ((int*)qs->a)[i]);
@@ -719,7 +721,7 @@ main(int argc, char *argv[])
 	}
 	gettimeofday(&end, NULL);
 	getrusage(RUSAGE_SELF, &ru);
-#ifdef SORT_DEBUG
+#ifdef DEBUG_SORT
 	for (i = 0; i < nelem; i++)
 		fprintf(stderr, "%d ", int_elem[i]);
 	fprintf(stderr, "\n");
