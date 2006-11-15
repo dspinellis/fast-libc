@@ -291,7 +291,8 @@ qsort_launch(struct qsort *qs)
 #endif
 	for (;;) {
 		ensure(pthread_mutex_lock(&qs->common->mtx_common) == 0);
-		if (qs->common->workingslots < qs->common->nslots) {
+		if (qs->common->workingslots < qs->common->nslots &&
+		    qs->common->activeslots < 4 * qs->common->nslots) {
 			qs->common->workingslots++;
 			qs->common->activeslots++;
 			for (i = 0; i < qs->common->nslots; i++)
