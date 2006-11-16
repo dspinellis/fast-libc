@@ -321,39 +321,25 @@ allocate_thread(struct common *c)
 }
 
 /* Thread-callable quicksort. */
-static void *
-qsort_thread(void *p)
+static void
+qsort_algo(struct qsort *qs)
 {
 	char *pa, *pb, *pc, *pd, *pl, *pm, *pn;
 	int d, r, swaptype, swap_cnt;
-	struct qsort *qs, *qs2;
 	void *a;			/* Array of elements. */
 	size_t n, es;			/* Number of elements; size. */
 	cmp_t *cmp;
 	int nl, nr, i;
 	struct common *c;
+	struct qsort *qs2;
 	pthread_t id;
 
-	qs = p;
-	/* Initialize per-thread qsort arguments. */
+	/* Initialize qsort arguments. */
 	id = qs->id;
 	c = qs->common;
 	es = c->es;
 	cmp = c->cmp;
 	swaptype = c->swaptype;
-again:
-	/* Wait for work to be allocated. */
-	DLOG("%10x n=%-10d Thread waiting for work.\n", id, 0);
-	verify(pthread_mutex_lock(&qs->mtx_st));
-	while (qs->st == ts_idle)
-		verify(pthread_cond_wait(&qs->cond_st, &qs->mtx_st));
-	verify(pthread_mutex_unlock(&qs->mtx_st));
-	if (qs->st == ts_term) {
-		DLOG("%10x n=%-10d Thread signalled to exit.\n", id, 0);
-		return;
-	}
-	assert(qs->st == ts_work);
-	/* Initialize per-invocation qsort arguments. */
 	a = qs->a;
 	n = qs->n;
 	DLOG("%10x n=%-10d Thread has work allocated.\n", id, n);
@@ -372,7 +358,7 @@ again:
 			     pl > (char *)a && CMP(thunk, pl - es, pl) > 0;
 			     pl -= es)
 				swap(pl, pl - es);
-		goto done;
+		return;
 	}
 	pm = (char *)a + (n / 2) * es;
 	if (n > 7) {
@@ -420,7 +406,7 @@ again:
 			     pl > (char *)a && CMP(thunk, pl - es, pl) > 0;
 			     pl -= es)
 				swap(pl, pl - es);
-		goto done;
+		return;
 	}
 
 	pn = (char *)a + n * es;
@@ -454,7 +440,7 @@ again:
 		} else {
 			DLOG("%10x n=%-10d Left will be done in-house.\n", id, n);
 			qs->n = nl;
-			qsort_thread(qs);
+			qsort_algo(qs);
 		}
 	}
 	if (nr > c->forkelem) {
@@ -469,14 +455,42 @@ again:
 			DLOG("%10x n=%-10d Right will be done in-house.\n", id, n);
 			qs->a = pn - nr * es;
 			qs->n = nr;
-			qsort_thread(qs);
+			qsort_algo(qs);
 		}
 	}
-done:
+}
+
+/* Thread-callable quicksort. */
+static void *
+qsort_thread(void *p)
+{
+	struct qsort *qs, *qs2;
+	int i;
+	struct common *c;
+	pthread_t id;
+
+	qs = p;
+	id = qs->id;
+	c = qs->common;
+again:
+	/* Wait for work to be allocated. */
+	DLOG("%10x n=%-10d Thread waiting for work.\n", id, 0);
+	verify(pthread_mutex_lock(&qs->mtx_st));
+	while (qs->st == ts_idle)
+		verify(pthread_cond_wait(&qs->cond_st, &qs->mtx_st));
+	verify(pthread_mutex_unlock(&qs->mtx_st));
+	if (qs->st == ts_term) {
+		DLOG("%10x n=%-10d Thread signalled to exit.\n", id, 0);
+		return;
+	}
+	assert(qs->st == ts_work);
+
+	qsort_algo(qs);
+
 	verify(pthread_mutex_lock(&c->mtx_al));
 	qs->st = ts_idle;
 	c->idlethreads++;
-	DLOG("%10x n=%-10d Finished idlethreads=%d.\n", id, n, c->idlethreads);
+	DLOG("%10x n=%-10d Finished idlethreads=%d.\n", id, 0, c->idlethreads);
 	if (c->idlethreads == c->nthreads) {
 		DLOG("%10x n=%-10d All threads idle, signalling shutdown.\n", id, 0);
 		for (i = 0; i < c->nthreads; i++) {
@@ -489,6 +503,7 @@ done:
 			verify(pthread_mutex_unlock(&qs2->mtx_st));
 		}
 		DLOG("%10x n=%-10d Shutdown signalling complete.\n", id, 0);
+		verify(pthread_mutex_unlock(&c->mtx_al));
 		return;
 	}
 	verify(pthread_mutex_unlock(&c->mtx_al));
@@ -497,6 +512,7 @@ done:
 
 #ifdef TEST
 #include <unistd.h>
+#include <stdint.h>
 
 #include <sys/time.h>
 #include <sys/resource.h>
@@ -548,6 +564,7 @@ main(int argc, char *argv[])
 	struct timeval start, end;
 	struct rusage ru;
 
+	gettimeofday(&start, NULL);
 	while ((ch = getopt(argc, argv, "f:h:ln:stv")) != -1) {
 		switch (ch) {
 		case 'f':
@@ -610,7 +627,6 @@ main(int argc, char *argv[])
 		for (i = 0; i < nelem; i++)
 			int_elem[i] = rand() % nelem;
 	}
-	gettimeofday(&start, NULL);
 	if (opt_str) {
 		if (opt_libc)
 			qsort(str_elem, nelem, sizeof(char *), (cmp_t *)strcmp);
@@ -638,7 +654,7 @@ main(int argc, char *argv[])
 				exit(2);
 			}
 	if (opt_time)
-		printf("%g %g %g\n",
+		printf("%.3g %.3g %.3g\n",
 			(end.tv_sec - start.tv_sec) +
 			(end.tv_usec - start.tv_usec) / 1e6,
 			ru.ru_utime.tv_sec + ru.ru_utime.tv_usec / 1e6,
