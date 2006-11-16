@@ -78,7 +78,8 @@ __FBSDID("$FreeBSD: src/lib/libc/stdlib/qsort.c,v 1.12 2002/09/10 02:04:49 wollm
 #define verify(x) do {				\
 	int e;					\
 	if ((e = x) != 0) {			\
-		fprintf(stderr, "%s: %s\n", 	\
+		fprintf(stderr, "%s(%d) %s: %s\n",\
+		    __FILE__, __LINE__,		\
 		    #x, strerror(e)); 		\
 		exit(1);			\
 	}					\
@@ -165,51 +166,37 @@ med3(char *a, char *b, char *c, cmp_t *cmp, void *thunk
  */
 
 /* Condition of starting a new thread. */
-enum start_cond {
-	sc_join,		/* Join thread joinid. */
-	sc_signal,		/* Wait on cond_ga. */
-	sc_none			/* Start immediately. */
+enum thread_state {
+	ts_idle,		/* Idle, waiting for instructions. */
+	ts_work,		/* Has work to do. */
+	ts_term			/* Asked to terminate. */
 };
 
 /* Variant part passed to qsort invocations. */
 struct qsort {
-	bool used;		/* True if slot is in use. */
+	enum thread_state st;	/* For coordinating work. */
 	struct common *common;	/* Common shared elements. */
 	void *a;		/* Array base. */
 	size_t n;		/* Number of elements. */
 	pthread_t id;		/* Thread id. */
-	enum start_cond sc;	/* Start condition. */
-	struct qsort *sibling;	/* Sibling for giving a go ahead after
-				   joining joinid. */
-	bool ga;		/* A sibling tests this to go ahead. */
-	pthread_mutex_t mtx_ga;	/* For signalling go ahead. */
-	pthread_cond_t cond_ga;	/* For signalling go ahead. */
-	pthread_t joinid;	/* Thread to join before starting. */
+	pthread_mutex_t mtx_st;	/* For signalling state change. */
+	pthread_cond_t cond_st;	/* For signalling state change. */
 };
 
 /* Invariant common part, shared across invocations. */
 struct common {
 	int swaptype;		/* Code to use for swapping */
-	struct chunk *chunk;	/* Chunk of work. */
 	size_t es;		/* Element size. */
 	void *thunk;		/* Thunk for qsort_r */
 	cmp_t *cmp;		/* Comparison function */
-	int nthreads;		/* Number of working threads. */
-	int nslots;		/* Number of thread slots. */
-	int workingslots;	/* Number of threads doing sort work. */
-				/* Used for thread spawning. */
-	int activeslots;	/* Number of threads active. */
-				/* Used for terminating. */
+	int nthreads;		/* Total number of pool threads. */
+	int idlethreads;	/* Number of idle threads in pool. */
 	int forkelem;		/* Minimum number of elements for a new thread. */
-	struct qsort *slots;	/* Slots for storing per-thread data. */
-	pthread_mutex_t mtx_common;	/* For accessing used threads. */
-	pthread_mutex_t mtx_slot;	/* For signalling slot availability. */
-	pthread_mutex_t mtx_done;	/* For signalling termination. */
-	pthread_cond_t cond_slot;	/* For signalling slot availability. */
-	pthread_cond_t cond_done;	/* For signalling termination. */
+	struct qsort *pool;	/* Fixed pool of threads. */
+	pthread_mutex_t mtx_al;	/* For allocating threads in the pool. */
 };
 
-static void *qsort_algo(void *p);
+static void *qsort_thread(void *p);
 static struct qsort *qsort_launch(struct qsort *qs);
 
 /* The multithreaded qsort public interface */
@@ -217,7 +204,7 @@ void
 qsort_mt(void *a, size_t n, size_t es, cmp_t *cmp, int maxthreads, int forkelem)
 {
 	int ncpu;
-	struct qsort qs;
+	struct qsort *qs;
 	struct common c;
 	int i, islot;
 	bool bailout = true;
@@ -238,26 +225,25 @@ qsort_mt(void *a, size_t n, size_t es, cmp_t *cmp, int maxthreads, int forkelem)
 		goto f1;
 	*/
 	/* Try to initialize the resources we need. */
-	if (pthread_mutex_init(&c.mtx_common, NULL) != 0)
+	if (pthread_mutex_init(&c.mtx_al, NULL) != 0)
 		goto f1;
-	if (pthread_mutex_init(&c.mtx_slot, NULL) != 0)
+	if ((c.pool = (struct qsort *)calloc(maxthreads, sizeof(struct qsort))) ==NULL)
 		goto f2;
-	if (pthread_mutex_init(&c.mtx_done, NULL) != 0)
-		goto f3;
-	if (pthread_cond_init(&c.cond_slot, NULL) != 0)
-		goto f4;
-	if (pthread_cond_init(&c.cond_done, NULL) != 0)
-		goto f5;
-	if ((c.slots = (struct qsort *)calloc(maxthreads, sizeof(struct qsort))) ==NULL)
-		goto f6;
 	for (islot = 0; islot < maxthreads; islot++) {
-		if (pthread_mutex_init(&c.slots[islot].mtx_ga, NULL) != 0)
-			goto f7;
-		if (pthread_cond_init(&c.slots[islot].cond_ga, NULL) != 0) {
-			verify(pthread_mutex_destroy(&c.slots[islot].mtx_ga));
-			goto f7;
+		qs = &c.pool[islot];
+		if (pthread_mutex_init(&qs->mtx_st, NULL) != 0)
+			goto f3;
+		if (pthread_cond_init(&qs->cond_st, NULL) != 0) {
+			verify(pthread_mutex_destroy(&qs->mtx_st));
+			goto f3;
 		}
-		c.slots[islot].common = &c;
+		if (pthread_create(&qs->id, NULL, qsort_thread, qs) != 0) {
+			verify(pthread_mutex_destroy(&qs->mtx_st));
+			verify(pthread_cond_destroy(&qs->cond_st));
+			goto f3;
+		}
+		qs->st = ts_idle;
+		qs->common = &c;
 	}
 
 	/* All systems go. */
@@ -269,45 +255,36 @@ qsort_mt(void *a, size_t n, size_t es, cmp_t *cmp, int maxthreads, int forkelem)
 	c.es = es;
 	c.cmp = cmp;
 	c.forkelem = forkelem;
-	c.nthreads = maxthreads;
-	c.nslots = maxthreads * 3;
-	c.workingslots = 0;
-	c.activeslots = 0;
+	c.idlethreads = c.nthreads = maxthreads;
 
 	/* Hand out the first work batch. */
-	qs.a = a;
-	qs.n = n;
-	qs.common = &c;
-	qs.sibling = NULL;
-	qs.sc = sc_none;
-	qsort_launch(&qs);
+	qs = &c.pool[0];
+	verify(pthread_mutex_lock(&qs->mtx_st));
+	qs->a = a;
+	qs->n = n;
+	qs->st = ts_work;
+	c.idlethreads--;
+	verify(pthread_cond_signal(&qs->cond_st));
+	verify(pthread_mutex_unlock(&qs->mtx_st));
 
-	/* Wait for all threads to finish */
-	verify(pthread_mutex_lock(&c.mtx_done));
-	for (;;) {
-		verify(pthread_cond_wait(&c.cond_done, &c.mtx_done));
-		DLOG("Got completion signal.\n");
-		verify(pthread_mutex_lock(&c.mtx_common));
-		if (c.activeslots == 0)
-			break;
-		verify(pthread_mutex_unlock(&c.mtx_common));
+	/* 
+	 * Wait for all threads to finish, and
+	 * free acquired resources.
+	 */
+f3:	for (i = 0; i < islot; i++) {
+		qs = &c.pool[i];
+		if (bailout) {
+			verify(pthread_mutex_lock(&qs->mtx_st));
+			qs->st = ts_term;
+			verify(pthread_cond_signal(&qs->cond_st));
+			verify(pthread_mutex_unlock(&qs->mtx_st));
+		}
+		verify(pthread_join(qs->id, NULL));
+		verify(pthread_mutex_destroy(&qs->mtx_st));
+		verify(pthread_cond_destroy(&qs->cond_st));
 	}
-	verify(pthread_mutex_unlock(&c.mtx_done));
-	verify(pthread_mutex_unlock(&c.mtx_common));
-
-	/* Free acquired resources. */
-	DLOG("maxthreads=%d islot=%d.\n", maxthreads, islot);
-f7:	for (i = 0; i < islot; i++) {
-		DLOG("Destroy resource %d=%p.\n", i, c.slots[i].mtx_ga);
-		verify(pthread_mutex_destroy(&c.slots[i].mtx_ga));
-		verify(pthread_cond_destroy(&c.slots[i].cond_ga));
-	}
-	free(c.slots);
-f6:	verify(pthread_cond_destroy(&c.cond_done));
-f5:	verify(pthread_cond_destroy(&c.cond_slot));
-f4:	verify(pthread_mutex_destroy(&c.mtx_done));
-f3:	verify(pthread_mutex_destroy(&c.mtx_slot));
-f2:	verify(pthread_mutex_destroy(&c.mtx_common));
+	free(c.pool);
+f2:	verify(pthread_mutex_destroy(&c.mtx_al));
 	if (bailout) {
 		DLOG("Resource initialization failed; bailing out.\n");
 		/* XXX should include a syslog call here */
@@ -319,129 +296,67 @@ f1:		qsort(a, n, es, cmp);
 #define thunk NULL
 
 /*
- * Launch a quicksort thread.
- * The qs pointer to our thread's data is temporary and
- * may be destroyed after this routine returns.
- * Return a pointer to the allocated data structure.
+ * Allocate an idle thread from the pool, lock its
+ * mutex, change its state to work, decrease the number
+ * of idle threads, and return a
+ * pointer to its data area.
+ * Return NULL, if no thread is available.
  */
 static struct qsort *
-qsort_launch(struct qsort *qs)
+allocate_thread(struct common *c)
 {
 	int i;
-	struct qsort *sqs;
 
-	DLOG("%10s n=%-10d Start at %p\n", "Launcher", qs->n, qs->a);
-#ifdef DEBUG_SORT
-	for (i = 0; i < qs->n; i++)
-		fprintf(stderr, "%d ", ((int*)qs->a)[i]);
-	putc('\n', stderr);
-#endif
-	for (;;) {
-		verify(pthread_mutex_lock(&qs->common->mtx_common));
-		if (qs->common->workingslots < qs->common->nthreads) {
-			qs->common->workingslots++;
-			qs->common->activeslots++;
-			/* Find the empty slot */
-			for (i = 0; i < qs->common->nslots; i++)
-				if (!qs->common->slots[i].used) {
-					sqs = &qs->common->slots[i];
-					sqs->a = qs->a;
-					sqs->n = qs->n;
-					sqs->sc = qs->sc;
-					sqs->sibling = qs->sibling;
-					sqs->joinid = qs->joinid;
-					sqs->used = true;
-					sqs->ga = false;
-					qs = sqs;
-					break;
-				}
-			assert(i != qs->common->nslots);
-			verify(pthread_mutex_unlock(&qs->common->mtx_common));
-			if (pthread_create(&qs->id, NULL, qsort_algo, qs) == 0) {
-				DLOG("%10x n=%-10d Started new thread: i=%d activeslots=%d\n",
-				    qs->id, qs->n, i, qs->common->activeslots);
-				return (qs);
-			} else if (errno == EAGAIN) {
-				/* Could sleep(2), but probably faster to qsort(3). */
-				verify(pthread_mutex_lock(&qs->common->mtx_common));
-				qs->common->workingslots--;
-				qs->common->activeslots--;
-				qs->used = false;
-				verify(pthread_mutex_unlock(&qs->common->mtx_common));
-				qsort(qs->a, qs->n, qs->common->es, qs->common->cmp);
-				/* XXX should include a syslog call here */
-				DLOG("EAGAIN on create_thread\n");
-				fprintf(stderr, "EAGAIN on create_thread\n");
-				return (NULL);
-			} else {
-				/* XXX Remove printf/perror from production release */
-				fprintf(stderr, "active=%d, working=%d\n",
-				    qs->common->workingslots,
-				    qs->common->activeslots);
-				perror("pthread_create");
-				assert(("pthread_create failed", false));
-			}
-		} else
-			verify(pthread_mutex_unlock(&qs->common->mtx_common));
-		/* Wait for a thread to finish. */
-		DLOG("%10s n=%-10d Wait for thread termination\n", "Launcher", qs->n);
-		verify(pthread_mutex_lock(&qs->common->mtx_slot));
-		verify(pthread_cond_wait(&qs->common->cond_slot,
-		    &qs->common->mtx_slot));
-		verify(pthread_mutex_unlock(&qs->common->mtx_slot));
-	}
+	verify(pthread_mutex_lock(&c->mtx_al));
+	for (i = 0; i < c->nthreads; i++)
+		if (c->pool[i].st == ts_idle) {
+			c->idlethreads--;
+			c->pool[i].st = ts_work;
+			verify(pthread_mutex_lock(&c->pool[i].mtx_st));
+			verify(pthread_mutex_unlock(&c->mtx_al));
+			return (&c->pool[i]);
+		}
+	verify(pthread_mutex_unlock(&c->mtx_al));
+	return (NULL);
 }
 
 /* Thread-callable quicksort. */
 static void *
-qsort_algo(void *p)
+qsort_thread(void *p)
 {
 	char *pa, *pb, *pc, *pd, *pl, *pm, *pn;
 	int d, r, swaptype, swap_cnt;
-	int nchildren = 0;		/* Number of threads to launch. */
-	struct qsort *qs, left, right, *lleft, *lright;
+	struct qsort *qs, *qs2;
 	void *a;			/* Array of elements. */
 	size_t n, es;			/* Number of elements; size. */
 	cmp_t *cmp;
-	int nl, nr;
+	int nl, nr, i;
 	struct common *c;
 	pthread_t id;
 
 	qs = p;
+	/* Initialize per-thread qsort arguments. */
 	id = qs->id;
-	/* Initialize traditional qsort arguments. */
 	c = qs->common;
-	a = qs->a;
-	n = qs->n;
 	es = c->es;
 	cmp = c->cmp;
 	swaptype = c->swaptype;
-	DLOG("%10x n=%-10d Running thread sc=%d.\n", id, n, qs->sc);
-	/* Wait for a go ahead, if needed. */
-	switch (qs->sc) {
-	case sc_join:	/* Wait for our parent to terminate. */
-		DLOG("%10x n=%-10d Waiting to join %x.\n", id, n, qs->joinid);
-		verify(pthread_join(qs->joinid, NULL));
-		if (qs->sibling) {
-			/* Give our sibling a go ahead. */
-			DLOG("%10x n=%-10d Signalling %x.\n", id, n, qs->sibling->id);
-			verify(pthread_mutex_lock(&qs->sibling->mtx_ga));
-			qs->sibling->ga = true;
-			verify(pthread_cond_signal(&qs->sibling->cond_ga));
-			verify(pthread_mutex_unlock(&qs->sibling->mtx_ga));
-		}
-		break;
-	case sc_signal:	/* Wait for our sibling to give us a go ahead. */
-		DLOG("%10x n=%-10d Waiting for signal.\n", id, n);
-		verify(pthread_mutex_lock(&qs->mtx_ga));
-		while (!qs->ga)
-			verify(pthread_cond_wait(&qs->cond_ga, &qs->mtx_ga));
-		verify(pthread_mutex_unlock(&qs->mtx_ga));
-		break;
-	case sc_none:
-		break;
+again:
+	/* Wait for work to be allocated. */
+	DLOG("%10x n=%-10d Thread waiting for work.\n", id, 0);
+	verify(pthread_mutex_lock(&qs->mtx_st));
+	while (qs->st == ts_idle)
+		verify(pthread_cond_wait(&qs->cond_st, &qs->mtx_st));
+	verify(pthread_mutex_unlock(&qs->mtx_st));
+	if (qs->st == ts_term) {
+		DLOG("%10x n=%-10d Thread signalled to exit.\n", id, 0);
+		return;
 	}
-	DLOG("%10x n=%-10d Got the go ahead\n", id, n);
+	assert(qs->st == ts_work);
+	/* Initialize per-invocation qsort arguments. */
+	a = qs->a;
+	n = qs->n;
+	DLOG("%10x n=%-10d Thread has work allocated.\n", id, n);
 #ifdef DEBUG_SORT
 	int i;
 	for (i = 0; i < qs->n; i++)
@@ -457,7 +372,6 @@ qsort_algo(void *p)
 			     pl > (char *)a && CMP(thunk, pl - es, pl) > 0;
 			     pl -= es)
 				swap(pl, pl - es);
-		left.n = right.n = 0;
 		goto done;
 	}
 	pm = (char *)a + (n / 2) * es;
@@ -506,7 +420,6 @@ qsort_algo(void *p)
 			     pl > (char *)a && CMP(thunk, pl - es, pl) > 0;
 			     pl -= es)
 				swap(pl, pl - es);
-		left.n = right.n = 0;
 		goto done;
 	}
 
@@ -516,81 +429,70 @@ qsort_algo(void *p)
 	r = min(pd - pc, pn - pd - es);
 	vecswap(pb, pn - r, r);
 
+	nl = (pb - pa) / es;
+	nr = (pd - pc) / es;
+	DLOG("%10x n=%-10d Partitioning finished ln=%d rn=%d.\n", id, n, nl, nr);
 	/*
 	 * Sort the partitioned subparts.
-	 * First see if we should sort them without a new thread.
+	 * First see if we should sort them without new threads.
 	 */
-	left.n = (pb - pa) / es;
-	if (left.n > 0 && left.n <= c->forkelem)
+	if (nl > 0 && nl <= c->forkelem)
 		qsort(a, n, es, cmp);
-	else
-		nchildren++;
-	right.n = (pd - pc) / es;
-	if (right.n > 0 && right.n <= c->forkelem)
+
+	if (nr > 0 && nr <= c->forkelem)
 		qsort(a, n, es, cmp);
-	else
-		nchildren++;
-	/*
-	 * At this point all the hard work is done.  We mark
-	 * a slot as available, so that the launcher won't deadlock.
-	 */
-done:
-	DLOG("%10x n=%-10d Hard work finished ln=%d rn=%d.\n", id, n, left.n, right.n);
-	verify(pthread_mutex_lock(&c->mtx_common));
-	c->workingslots--;
-	/* Free our slot, and stop using it. */
-	qs->used = false;
-	qs = NULL;
-	/* Indicate that a slot is now free. */
-	DLOG("%10x n=%-10d Signal free slot.\n", id, n);
-	verify(pthread_mutex_lock(&c->mtx_slot));
-	verify(pthread_cond_signal(&c->cond_slot));
-	verify(pthread_mutex_unlock(&c->mtx_slot));
-	verify(pthread_mutex_unlock(&c->mtx_common));
-	/* Launch threads for the two halfs. */
-	lleft = NULL;
-	if (left.n > c->forkelem) {
-		left.common = c;
-		left.a = a;
-		left.sc = sc_join;
-		left.joinid = id;
-		lleft = qsort_launch(&left);
-		if (lleft == NULL)
-			nchildren--;
-	}
-	if (right.n > c->forkelem) {
-		right.common = c;
-		right.a = pn - right.n * es;
-		if (nchildren == 2)
-			right.sc = sc_signal;
-		else {
-			right.sc = sc_join;
-			right.joinid = id;
+
+	/* Now try to launch subthreads. */
+	if (nl > c->forkelem) {
+		DLOG("%10x n=%-10d Calling allocate_thread for left.\n", id, n);
+		if ((qs2 = allocate_thread(c)) != NULL) {
+			DLOG("%10x n=%-10d Left farmed out to %x.\n", id, n, qs2->id);
+			qs2->a = a;
+			qs2->n = nl;
+			verify(pthread_cond_signal(&qs2->cond_st));
+			verify(pthread_mutex_unlock(&qs2->mtx_st));
+		} else {
+			DLOG("%10x n=%-10d Left will be done in-house.\n", id, n);
+			qs->n = nl;
+			qsort_thread(qs);
 		}
-		lright = qsort_launch(&right);
-		if (lright == NULL)
-			nchildren--;
 	}
-	if (nchildren == 2)
-		lleft->sibling = lright;
-	else if (lleft)
-		lleft->sibling = NULL;
-	/* Detach if nobody will ask to join us. */
-	if (nchildren == 0)
-		pthread_detach(id);
-	DLOG("%10x n=%-10d Sub-launchers finished.\n", id, n);
-	/*
-	 * At this point any additional threads have been launched.
-	 * If all slots are free, it means that all our work is done.
-	 */
-	verify(pthread_mutex_lock(&c->mtx_common));
-	c->activeslots--;
-	if (c->activeslots == 0) {
-		DLOG("%10x n=%-10d Signalling completion.\n", id, n);
-		verify(pthread_cond_signal(&c->cond_done));
+	if (nr > c->forkelem) {
+		DLOG("%10x n=%-10d Calling allocate_thread for right.\n", id, n);
+		if ((qs2 = allocate_thread(c)) != NULL) {
+			DLOG("%10x n=%-10d Right farmed out to %x.\n", id, n, qs2->id);
+			qs2->a = pn - nr * es;
+			qs2->n = nr;
+			verify(pthread_cond_signal(&qs2->cond_st));
+			verify(pthread_mutex_unlock(&qs2->mtx_st));
+		} else {
+			DLOG("%10x n=%-10d Right will be done in-house.\n", id, n);
+			qs->a = pn - nr * es;
+			qs->n = nr;
+			qsort_thread(qs);
+		}
 	}
-	verify(pthread_mutex_unlock(&c->mtx_common));
-	DLOG("%10x n=%-10d Finished.\n", id, n);
+done:
+	verify(pthread_mutex_lock(&c->mtx_al));
+	qs->st = ts_idle;
+	c->idlethreads++;
+	DLOG("%10x n=%-10d Finished idlethreads=%d.\n", id, n, c->idlethreads);
+	if (c->idlethreads == c->nthreads) {
+		DLOG("%10x n=%-10d All threads idle, signalling shutdown.\n", id, 0);
+		for (i = 0; i < c->nthreads; i++) {
+			qs2 = &c->pool[i];
+			if (qs2 == qs)
+				continue;
+			verify(pthread_mutex_lock(&qs2->mtx_st));
+			qs2->st = ts_term;
+			verify(pthread_cond_signal(&qs2->cond_st));
+			verify(pthread_mutex_unlock(&qs2->mtx_st));
+		}
+		DLOG("%10x n=%-10d Shutdown signalling complete.\n", id, 0);
+		return;
+	}
+	verify(pthread_mutex_unlock(&c->mtx_al));
+	goto again;
 }
 
 #ifdef TEST
