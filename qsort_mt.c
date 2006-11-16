@@ -342,11 +342,11 @@ qsort_algo(struct qsort *qs)
 	swaptype = c->swaptype;
 	a = qs->a;
 	n = qs->n;
-	DLOG("%10x n=%-10d Thread has work allocated.\n", id, n);
+top:
+	DLOG("%10x n=%-10d Sort starting.\n", id, n);
 #ifdef DEBUG_SORT
-	int i;
-	for (i = 0; i < qs->n; i++)
-		fprintf(stderr, "%d ", ((int*)qs->a)[i]);
+	for (i = 0; i < n; i++)
+		fprintf(stderr, "%d ", ((int*)a)[i]);
 	putc('\n', stderr);
 #endif
 
@@ -418,45 +418,26 @@ qsort_algo(struct qsort *qs)
 	nl = (pb - pa) / es;
 	nr = (pd - pc) / es;
 	DLOG("%10x n=%-10d Partitioning finished ln=%d rn=%d.\n", id, n, nl, nr);
-	/*
-	 * Sort the partitioned subparts.
-	 * First see if we should sort them without new threads.
-	 */
-	if (nl > 0 && nl <= c->forkelem)
-		qsort(a, n, es, cmp);
-
-	if (nr > 0 && nr <= c->forkelem)
-		qsort(a, n, es, cmp);
 
 	/* Now try to launch subthreads. */
-	if (nl > c->forkelem) {
-		DLOG("%10x n=%-10d Calling allocate_thread for left.\n", id, n);
-		if ((qs2 = allocate_thread(c)) != NULL) {
-			DLOG("%10x n=%-10d Left farmed out to %x.\n", id, n, qs2->id);
-			qs2->a = a;
-			qs2->n = nl;
-			verify(pthread_cond_signal(&qs2->cond_st));
-			verify(pthread_mutex_unlock(&qs2->mtx_st));
-		} else {
-			DLOG("%10x n=%-10d Left will be done in-house.\n", id, n);
-			qs->n = nl;
-			qsort_algo(qs);
-		}
+	if (nl > c->forkelem && nr > c->forkelem &&
+	    (qs2 = allocate_thread(c)) != NULL) {
+		DLOG("%10x n=%-10d Left farmed out to %x.\n", id, n, qs2->id);
+		qs2->a = a;
+		qs2->n = nl;
+		verify(pthread_cond_signal(&qs2->cond_st));
+		verify(pthread_mutex_unlock(&qs2->mtx_st));
+	} else if (nl > 0) {
+		DLOG("%10x n=%-10d Left will be done in-house.\n", id, n);
+		qs->a = a;
+		qs->n = nl;
+		qsort_algo(qs);
 	}
-	if (nr > c->forkelem) {
-		DLOG("%10x n=%-10d Calling allocate_thread for right.\n", id, n);
-		if ((qs2 = allocate_thread(c)) != NULL) {
-			DLOG("%10x n=%-10d Right farmed out to %x.\n", id, n, qs2->id);
-			qs2->a = pn - nr * es;
-			qs2->n = nr;
-			verify(pthread_cond_signal(&qs2->cond_st));
-			verify(pthread_mutex_unlock(&qs2->mtx_st));
-		} else {
-			DLOG("%10x n=%-10d Right will be done in-house.\n", id, n);
-			qs->a = pn - nr * es;
-			qs->n = nr;
-			qsort_algo(qs);
-		}
+	if (nr > 0) {
+		DLOG("%10x n=%-10d Right will be done in-house.\n", id, n);
+		a = pn - nr * es;
+		n = nr;
+		goto top;
 	}
 }
 
