@@ -517,10 +517,14 @@ again:
 #include <sys/time.h>
 #include <sys/resource.h>
 
+#ifndef ELEM_T
+#define ELEM_T uint32_t
+#endif
+
 int
 int_compare(const void *a, const void *b)
 {
-	return (*(uint32_t *)a - *(uint32_t *)b);
+	return (*(ELEM_T *)a - *(ELEM_T *)b);
 }
 
 void *
@@ -558,7 +562,7 @@ main(int argc, char *argv[])
 	size_t nelem = 10000000;
 	int threads = 2;
 	int forkelements = 100;
-	uint32_t *int_elem;
+	ELEM_T *int_elem;
 	char *ep;
 	char **str_elem;
 	struct timeval start, end;
@@ -623,7 +627,7 @@ main(int argc, char *argv[])
 				exit(1);
 			}
 	} else {
-		int_elem = (uint32_t *)xmalloc(nelem * sizeof(uint32_t));
+		int_elem = (ELEM_T *)xmalloc(nelem * sizeof(ELEM_T));
 		for (i = 0; i < nelem; i++)
 			int_elem[i] = rand() % nelem;
 	}
@@ -635,9 +639,9 @@ main(int argc, char *argv[])
 			    (cmp_t *)strcmp, threads, forkelements);
 	} else {
 		if (opt_libc)
-			qsort(int_elem, nelem, sizeof(uint32_t), int_compare);
+			qsort(int_elem, nelem, sizeof(ELEM_T), int_compare);
 		else
-			qsort_mt(int_elem, nelem, sizeof(uint32_t), int_compare, threads, forkelements);
+			qsort_mt(int_elem, nelem, sizeof(ELEM_T), int_compare, threads, forkelements);
 	}
 	gettimeofday(&end, NULL);
 	getrusage(RUSAGE_SELF, &ru);
