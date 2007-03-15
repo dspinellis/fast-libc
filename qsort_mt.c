@@ -1,6 +1,7 @@
 /*-
  * Copyright (c) 1992, 1993
  *	The Regents of the University of California.  All rights reserved.
+ * Multithread implementation Copyright (c) 2006, 2007 Diomidis Spinellis.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -10,10 +11,6 @@
  * 2. Redistributions in binary form must reproduce the above copyright
  *    notice, this list of conditions and the following disclaimer in the
  *    documentation and/or other materials provided with the distribution.
- * 3. All advertising materials mentioning features or use of this software
- *    must display the following acknowledgement:
- *	This product includes software developed by the University of
- *	California, Berkeley and its contributors.
  * 4. Neither the name of the University nor the names of its contributors
  *    may be used to endorse or promote products derived from this software
  *    without specific prior written permission.
@@ -35,7 +32,7 @@
 static char sccsid[] = "@(#)qsort.c	8.1 (Berkeley) 6/4/93";
 #endif /* LIBC_SCCS and not lint */
 #include <sys/cdefs.h>
-#ifndef linux
+#ifdef __FBSDID
 __FBSDID("$FreeBSD: src/lib/libc/stdlib/qsort.c,v 1.12 2002/09/10 02:04:49 wollman Exp $");
 #endif
 
@@ -49,7 +46,7 @@ __FBSDID("$FreeBSD: src/lib/libc/stdlib/qsort.c,v 1.12 2002/09/10 02:04:49 wollm
 #include <assert.h>
 #include <errno.h>
 #include <stdio.h>
-#ifndef linux
+#ifdef __FreeBSD__
 #include <pmc.h>
 #endif
 
@@ -60,7 +57,7 @@ __FBSDID("$FreeBSD: src/lib/libc/stdlib/qsort.c,v 1.12 2002/09/10 02:04:49 wollm
  * mutex.  Other errors (e.g. unavailable resources)
  * are always checked and acted upon.
  */
-#define DEBUG_API 1
+#define DEBUG_API 0
 
 /*
  * Defining the followin macro will print on stderr the results
@@ -212,8 +209,13 @@ qsort_mt(void *a, size_t n, size_t es, cmp_t *cmp, int maxthreads, int forkelem)
 	if (n < forkelem)
 		goto f1;
 	errno = 0;
-#ifndef linux
+#ifdef __FreeBSD__
 	if (maxthreads == 0) {
+		/*
+		 * Other candidates:
+		 * NPROC environment variable (BSD/OS, CrayOS)
+		 * sysctl hw.ncpu or kern.smp.cpus
+		 */
 		if (pmc_init() == 0 && (ncpu = pmc_ncpu()) != -1)
 			maxthreads = ncpu;
 		else
@@ -237,13 +239,13 @@ qsort_mt(void *a, size_t n, size_t es, cmp_t *cmp, int maxthreads, int forkelem)
 			verify(pthread_mutex_destroy(&qs->mtx_st));
 			goto f3;
 		}
+		qs->st = ts_idle;
+		qs->common = &c;
 		if (pthread_create(&qs->id, NULL, qsort_thread, qs) != 0) {
 			verify(pthread_mutex_destroy(&qs->mtx_st));
 			verify(pthread_cond_destroy(&qs->cond_st));
 			goto f3;
 		}
-		qs->st = ts_idle;
-		qs->common = &c;
 	}
 
 	/* All systems go. */
@@ -503,9 +505,15 @@ again:
 #endif
 
 int
-int_compare(const void *a, const void *b)
+num_compare(const void *a, const void *b)
 {
 	return (*(ELEM_T *)a - *(ELEM_T *)b);
+}
+
+int
+string_compare(const void *a, const void *b)
+{
+	return strcmp(*(char **)a, *(char **)b);
 }
 
 void *
@@ -614,15 +622,15 @@ main(int argc, char *argv[])
 	}
 	if (opt_str) {
 		if (opt_libc)
-			qsort(str_elem, nelem, sizeof(char *), (cmp_t *)strcmp);
+			qsort(str_elem, nelem, sizeof(char *), string_compare);
 		else
 			qsort_mt(str_elem, nelem, sizeof(char *),
-			    (cmp_t *)strcmp, threads, forkelements);
+			    string_compare, threads, forkelements);
 	} else {
 		if (opt_libc)
-			qsort(int_elem, nelem, sizeof(ELEM_T), int_compare);
+			qsort(int_elem, nelem, sizeof(ELEM_T), num_compare);
 		else
-			qsort_mt(int_elem, nelem, sizeof(ELEM_T), int_compare, threads, forkelements);
+			qsort_mt(int_elem, nelem, sizeof(ELEM_T), num_compare, threads, forkelements);
 	}
 	gettimeofday(&end, NULL);
 	getrusage(RUSAGE_SELF, &ru);
