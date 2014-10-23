@@ -364,7 +364,7 @@ top:
 	}
 	pm = (char *)a + (n / 2) * es;
 	if (n > 7) {
-		pl = a;
+		pl = (char *)a;
 		pn = (char *)a + (n - 1) * es;
 		if (n > 40) {
 			d = (n / 8) * es;
