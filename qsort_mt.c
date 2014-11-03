@@ -269,7 +269,7 @@ qsort_mt(void *a, size_t n, size_t es, cmp_t *cmp, int maxthreads, int forkelem)
 	verify(pthread_cond_signal(&qs->cond_st));
 	verify(pthread_mutex_unlock(&qs->mtx_st));
 
-	/* 
+	/*
 	 * Wait for all threads to finish, and
 	 * free acquired resources.
 	 */
@@ -402,20 +402,26 @@ top:
 		pb += es;
 		pc -= es;
 	}
-	if (swap_cnt == 0) {  /* Switch to insertion sort */
-		for (pm = (char *)a + es; pm < (char *)a + n * es; pm += es)
-			for (pl = pm;
-			     pl > (char *)a && CMP(thunk, pl - es, pl) > 0;
-			     pl -= es)
-				swap(pl, pl - es);
-		return;
-	}
 
 	pn = (char *)a + n * es;
 	r = min(pa - (char *)a, pb - pa);
 	vecswap(a, pb - r, r);
 	r = min(pd - pc, pn - pd - es);
 	vecswap(pb, pn - r, r);
+
+	if (swap_cnt == 0) { /* Switch to insertion sort */
+		r = 1 + n / 4;
+		for (pm = (char *)a + es; pm < (char *)a + n * es; pm += es)
+			for (pl = pm;
+			     pl > (char *)a && CMP(thunk, pl - es, pl) > 0;
+			     pl -= es) {
+				swap(pl, pl - es);
+				if (++swap_cnt > r) goto nevermind;
+			}
+		return;
+	}
+
+nevermind:
 
 	nl = (pb - pa) / es;
 	nr = (pd - pc) / es;
