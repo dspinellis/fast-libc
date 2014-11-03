@@ -410,7 +410,7 @@ top:
 	vecswap(pb, pn - r, r);
 
 	if (swap_cnt == 0) { /* Switch to insertion sort */
-		r = 1 + n / 4;
+		r = 1 + n / 4; /* n >= 7, so r >= 2 */
 		for (pm = (char *)a + es; pm < (char *)a + n * es; pm += es)
 			for (pl = pm;
 			     pl > (char *)a && CMP(thunk, pl - es, pl) > 0;
